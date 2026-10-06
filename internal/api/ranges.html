@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>调用时刻范围复核</title><h1>调用时刻差的可行范围</h1><textarea id="request" rows="20" cols="90"></textarea><button id="run">复核范围</button><output id="status"></output><pre id="result"></pre><button id="download">下载同次证据</button><script>
+const $=id=>document.getElementById(id);let revision=0,result=null;
+$('request').value=JSON.stringify({input:{services:[{id:'a',lo:0,hi:0},{id:'b',lo:-10,hi:10}],spans:[{id:'p',service:'a',parent:'',start:0,end:10},{id:'c',service:'b',parent:'p',start:0,end:10}]},queries:[{id:'q',left:{span:'p',point:'start'},right:{span:'c',point:'start'}}]},null,2);
+$('request').oninput=()=>{revision++;result=null;$('result').textContent='';$('status').textContent='输入已变化';};
+$('run').onclick=async()=>{const token=revision,body=$('request').value;result=null;try{const response=await fetch('/api/ranges',{method:'POST',headers:{'Content-Type':'application/json'},body});const candidate=await response.json();if(token!==revision)return;if(!response.ok)throw Error(candidate.error);result=candidate;$('result').textContent=JSON.stringify(candidate,null,2);$('status').textContent='复核完成';}catch(error){if(token===revision)$('status').textContent='拒绝：'+error.message;}};
+$('download').onclick=()=>{if(!result)return;const link=document.createElement('a'),url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));link.href=url;link.download='time-ranges.json';link.click();URL.revokeObjectURL(url);};
+</script>
