@@ -1,7 +1,185 @@
-<!doctype html><meta charset="utf-8"><title>调用时刻范围复核</title><h1>调用时刻差的可行范围</h1><textarea id="request" rows="20" cols="90"></textarea><button id="run">复核范围</button><output id="status"></output><pre id="result"></pre><button id="download">下载同次证据</button><script>
-const $=id=>document.getElementById(id);let revision=0,result=null;
-$('request').value=JSON.stringify({input:{services:[{id:'a',lo:0,hi:0},{id:'b',lo:-10,hi:10}],spans:[{id:'p',service:'a',parent:'',start:0,end:10},{id:'c',service:'b',parent:'p',start:0,end:10}]},queries:[{id:'q',left:{span:'p',point:'start'},right:{span:'c',point:'start'}}]},null,2);
-$('request').oninput=()=>{revision++;result=null;$('result').textContent='';$('status').textContent='输入已变化';};
-$('run').onclick=async()=>{const token=revision,body=$('request').value;result=null;try{const response=await fetch('/api/ranges',{method:'POST',headers:{'Content-Type':'application/json'},body});const candidate=await response.json();if(token!==revision)return;if(!response.ok)throw Error(candidate.error);result=candidate;$('result').textContent=JSON.stringify(candidate,null,2);$('status').textContent='复核完成';}catch(error){if(token===revision)$('status').textContent='拒绝：'+error.message;}};
-$('download').onclick=()=>{if(!result)return;const link=document.createElement('a'),url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));link.href=url;link.download='time-ranges.json';link.click();URL.revokeObjectURL(url);};
+<!doctype html>
+<meta charset="utf-8">
+<title>调用时刻范围复核</title>
+<style>
+  body { margin:0; background:#f4f5f7; color:#1f2430; font-family:system-ui,-apple-system,'Segoe UI',sans-serif; }
+  main { max-width:920px; margin:0 auto; padding:24px 16px 64px; }
+  h1 { font-size:22px; margin:0 0 8px; }
+  h2 { font-size:15px; margin:0 0 10px; }
+  .hint { color:#667085; font-size:13px; margin:4px 0 0; }
+  .card { background:#fff; border:1px solid #e4e7ec; border-radius:10px; padding:14px 16px; margin-top:16px; }
+  .card.stale { border-color:#f79009; color:#93370d; font-size:14px; }
+  .card.error { border-color:#f04438; }
+  .card.cycle { border-color:#f04438; }
+  .card.cycle li { font-size:13px; margin:4px 0; }
+  textarea { width:100%; box-sizing:border-box; font:12px ui-monospace,monospace; border:1px solid #d0d5dd; border-radius:8px; padding:8px; }
+  button { font:inherit; padding:5px 14px; border:1px solid #d0d5dd; border-radius:6px; background:#fff; cursor:pointer; margin-top:10px; }
+  button.primary { background:#155eef; border-color:#155eef; color:#fff; }
+  button:disabled { opacity:.45; cursor:default; }
+  table { border-collapse:collapse; width:100%; }
+  th,td { text-align:left; padding:5px 8px; font-size:13px; border-bottom:1px solid #eef0f3; vertical-align:top; }
+  th { color:#667085; font-weight:600; }
+  .neg { color:#b42318; }
+  .same { color:#155eef; }
+  code { font-family:ui-monospace,monospace; font-size:12px; }
+  pre { font:11px ui-monospace,monospace; background:#f8fafc; border:1px solid #e4e7ec; border-radius:8px; padding:8px; max-height:260px; overflow:auto; white-space:pre-wrap; }
+  details summary { cursor:pointer; font-size:12px; color:#667085; }
+  #status { font-size:13px; margin-left:10px; }
+</style>
+<main>
+  <h1>调用时刻差的可行范围</h1>
+  <p class="hint">
+    右时刻 − 左时刻的全局最小/最大值，同时受<strong>全部服务偏移界与全部父子调用约束</strong>限制。
+    每个端点各附一份完整且确实达到该值的偏移见证（两份不要求相同）；同服务两时刻共享偏移，
+    允许负差值与相等时刻。输入无解时仅展示矛盾环。编辑输入后，旧范围与下载证据立即失效。
+  </p>
+  <section class="card">
+    <textarea id="request" rows="20"></textarea>
+    <button id="run" class="primary">复核范围</button>
+    <button id="download" disabled>下载同次证据</button>
+    <output id="status"></output>
+  </section>
+  <section id="stale" class="card stale" hidden>输入已变化，旧范围与下载证据已失效，请重新复核。</section>
+  <section id="error" class="card error" hidden><h2>整份请求被拒绝</h2><ul id="errorlist"></ul></section>
+  <section id="cycle" class="card cycle" hidden>
+    <h2>原输入无解：矛盾环（总权重 <span id="cycweight"></span>）</h2>
+    <p class="hint">以下每条边都对应一条真实输入约束，首尾相接且权重和为负；不展示任何可行范围。</p>
+    <ol id="cyclelist"></ol>
+  </section>
+  <section id="ranges" class="card" hidden>
+    <h2>可行范围（保留查询 ID 与请求顺序）</h2>
+    <table>
+      <thead><tr><th>ID</th><th>左时刻</th><th>右时刻</th><th>最小值</th><th>最大值</th><th>端点见证（偏移）</th></tr></thead>
+      <tbody id="rangebody"></tbody>
+    </table>
+    <details><summary>查看原始 JSON（同次响应，下载内容与之相同）</summary><pre id="raw"></pre></details>
+  </section>
+</main>
+<script>
+// 与 web/src/lib/ranges-state.js 同语义（该模块由 vitest 回归覆盖）：
+// revision 即输入快照版本号；编辑输入后 token 失配，旧范围、矛盾环展示
+// 与“下载同次证据”按钮同时立即失效。页面保持零构建、内嵌可用。
+const $ = id => document.getElementById(id);
+let revision = 0, result = null;
+
+const example = {
+  input: {
+    services: [{id:'a',lo:0,hi:0},{id:'b',lo:-10,hi:10}],
+    spans: [
+      {id:'p',service:'a',parent:'',start:0,end:100},
+      {id:'c',service:'b',parent:'p',start:0,end:10}
+    ]
+  },
+  queries: [
+    {id:'z',left:{span:'p',point:'start'},right:{span:'c',point:'start'}},
+    {id:'m',left:{span:'c',point:'end'},right:{span:'p',point:'end'}}
+  ]
+};
+$('request').value = JSON.stringify(example, null, 2);
+
+// 编辑输入：快照失配，旧范围与下载立即失效。
+$('request').addEventListener('input', () => {
+  revision++; result = null;
+  $('download').disabled = true;
+  ['stale','error','cycle','ranges'].forEach(id => $(id).hidden = true);
+  $('status').textContent = '输入已变化';
+});
+
+function hideAllPanels() {
+  ['stale','error','cycle','ranges'].forEach(id => $(id).hidden = true);
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
+}
+function fmtTP(tp) { return `${esc(tp.span)}.${esc(tp.point)}`; }
+function fmtWitness(w) {
+  return Object.entries(w).sort((a,b) => a[0] < b[0] ? -1 : 1)
+    .map(([k,v]) => `${esc(k)}=${v >= 0 ? '+' : ''}${v}`).join(', ');
+}
+function edgeText(e) {
+  const ref = e.ref || {};
+  switch (ref.kind) {
+    case 'bound_upper': return `服务 ${esc(ref.service)} 的偏移上界（x ≤ hi）`;
+    case 'bound_lower': return `服务 ${esc(ref.service)} 的偏移下界（x ≥ lo）`;
+    case 'child_start': return `子 span ${esc(ref.span)} 起点须不早于父 span ${esc(ref.parentSpan)} 起点`;
+    case 'child_end':   return `子 span ${esc(ref.span)} 终点须不晚于父 span ${esc(ref.parentSpan)} 终点`;
+    default: return '未知约束';
+  }
+}
+const nodeName = n => n === '@zero' ? '零点基准' : esc(n);
+
+function renderRanges(res) {
+  $('rangebody').innerHTML = '';
+  for (const tr of res.ranges) {
+    const trEl = document.createElement('tr');
+    const same = tr.min === tr.max;
+    trEl.innerHTML =
+      `<td><code>${esc(tr.id)}</code></td>` +
+      `<td><code>${fmtTP(tr.left)}</code></td>` +
+      `<td><code>${fmtTP(tr.right)}</code></td>` +
+      `<td class="${tr.min < 0 ? 'neg' : ''}">${tr.min}</td>` +
+      `<td class="${same ? 'same' : ''}">${tr.max}${same ? ' <span class="hint">(相等)</span>' : ''}</td>` +
+      `<td><details><summary>最小 / 最大见证</summary>` +
+        `<div>达最小：<code>${fmtWitness(tr.minWitness)}</code></div>` +
+        `<div>达最大：<code>${fmtWitness(tr.maxWitness)}</code></div>` +
+      `</details></td>`;
+    $('rangebody').appendChild(trEl);
+  }
+}
+
+$('run').addEventListener('click', async () => {
+  const token = revision;
+  const body = $('request').value;
+  result = null; $('download').disabled = true; hideAllPanels();
+  $('status').textContent = '复核中…';
+  try {
+    const response = await fetch('/api/ranges', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body
+    });
+    const candidate = await response.json();
+    if (token !== revision) return; // 编辑过输入：本次响应作废
+    if (!response.ok) {
+      const errs = candidate.errors || [candidate.error || '请求被拒绝'];
+      $('errorlist').innerHTML = errs.map(e => `<li>${esc(e)}</li>`).join('');
+      $('error').hidden = false;
+      $('status').textContent = '整份拒绝';
+      return;
+    }
+    result = candidate;
+    const base = candidate.base || {};
+    if (base.status === 'infeasible') {
+      $('cycweight').textContent = base.cycle.totalWeight;
+      $('cyclelist').innerHTML = base.cycle.edges.map(e =>
+        `<li><code>${nodeName(e.from)} → ${nodeName(e.to)}</code>，权重 ${e.weight} — ${edgeText(e)}</li>`
+      ).join('');
+      $('cycle').hidden = false;
+      $('status').textContent = '原输入无解，仅展示矛盾环';
+      return; // 无解：下载证据也不启用（无“同次范围证据”可下载）
+    }
+    // 可行：响应逐行自带 left/right 与两份见证，渲染表格并启用同次下载。
+    renderRanges(candidate);
+    $('raw').textContent = JSON.stringify(candidate, null, 2);
+    $('ranges').hidden = false;
+    $('download').disabled = false;
+    $('status').textContent = '复核完成';
+  } catch (error) {
+    if (token === revision) {
+      $('errorlist').innerHTML = `<li>${esc(String(error.message || error))}</li>`;
+      $('error').hidden = false;
+      $('status').textContent = '请求失败';
+    }
+  }
+});
+
+// 下载“同次”证据：只下载当前未失效响应；编辑后 result 已清空且按钮禁用。
+$('download').addEventListener('click', () => {
+  if (!result) return;
+  const blob = new Blob([JSON.stringify(result, null, 2)], {type: 'application/json'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = 'time-ranges.json';
+  link.click();
+  URL.revokeObjectURL(url);
+});
 </script>
