@@ -14,7 +14,7 @@ func New(static fs.FS) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/solve", handleSolve)
 	mux.HandleFunc("POST /api/ranges", handleRanges)
-	mux.HandleFunc("GET /ranges", serveRanges)
+	mux.HandleFunc("GET /ranges", serveRanges(static))
 	mux.HandleFunc("GET /api/example", handleExample)
 	if static != nil {
 		mux.Handle("GET /", http.FileServerFS(static))
